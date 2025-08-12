@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Simple Reliable Translator</title>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&display=swap" rel="stylesheet">
+<link rel="manifest" href="manifest.json">
+<link rel="script" href="server.js">
+<link rel="script" href="service worker.js">
+<style>
+/* (keep your existing CSS unchanged) */
+:root{
+  --bg:#071223; --card:rgba(6,12,20,0.78); --muted:#8fa7bf; --text:#e8f2fb;
+  --accent1:#ff7eb3; --accent2:#65d4ff; --danger:#ff4d4d;
+}
+*{box-sizing:border-box;font-family:'Poppins',sans-serif}
+body{min-height:100vh;margin:0;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(180deg,#051226,#04101a);color:var(--text);padding:16px;}
+.card{width:100%;max-width:820px;background:var(--card);padding:18px;border-radius:12px;border:1px solid rgba(255,255,255,0.03)}
+.row{display:flex;gap:12px}
+.pane{flex:1;background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;min-height:160px;position:relative}
+.label{position:absolute;left:14px;top:10px;color:var(--muted);font-size:13px}
+textarea{width:100%;height:100%;background:transparent;border:none;color:var(--text);padding-top:28px;resize:none;outline:none;font-size:15px}
+.controls{display:flex;align-items:center;justify-content:space-between;margin-top:12px;gap:8px}
+select{padding:8px;border-radius:8px;border:none;background:transparent;color:var(--text)}
+.icons{display:flex;gap:10px;align-items:center}
+.icons button{background:none;border:none;color:#cfe8ff;cursor:pointer;font-size:18px}
+.actions{margin-top:12px;display:flex;gap:10px}
+.btn{flex:1;padding:12px;border-radius:8px;border:none;cursor:pointer;font-weight:600}
+.btn-primary{background:linear-gradient(90deg,var(--accent1),var(--accent2));color:#fff}
+.mic{background:var(--accent2);color:#fff;padding:10px 12px;border-radius:8px;border:none;cursor:pointer;transition:all .18s}
+.mic.listening{background:var(--danger);box-shadow:0 0 16px rgba(255,77,77,0.18);transform:scale(1.02)}
+.small{color:var(--muted);font-size:13px}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:24px;background:rgba(0,0,0,0.6);color:#fff;padding:8px 12px;border-radius:8px;display:none}
+@media (max-width:720px){.row{flex-direction:column}}
+</style>
+</head>
+<body>
+  <div class="card" role="main">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div style="font-weight:600">Translator — minimal & robust</div>
+      <div class="small">Serve on <strong>localhost</strong> / HTTPS for mic</div>
+    </div>
+
+    <div class="row">
+      <div class="pane">
+        <div class="label">Source</div>
+        <textarea id="src" placeholder="Type or speak..."></textarea>
+      </div>
+      <div class="pane">
+        <div class="label">Translation</div>
+        <textarea id="tgt" placeholder="Translation appears here" readonly></textarea>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div class="icons">
+          <button id="speakSrc" title="Speak source">🔊</button>
+          <button id="copySrc" title="Copy source">📋</button>
+        </div>
+        <select id="langFrom"></select>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:10px">
+        <button id="swap" title="Swap">⇄</button>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:10px">
+        <select id="langTo"></select>
+        <div class="icons">
+          <button id="speakTgt" title="Speak translation">🔊</button>
+          <button id="copyTgt" title="Copy translation">📋</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="translateBtn" class="btn btn-primary">Translate</button>
+      <button id="micBtn" class="mic">🎤 Microphone</button>
+      <button id="bhashiniAsrBtn" class="mic" title="Use server ASR (Bhashini) if available">🛰️ ASR</button>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+<script>
+(() => {
+  const src = document.getElementById('src');
+  const tgt = document.getElementById('tgt');
+  const langFrom = document.getElementById('langFrom');
+  const langTo = document.getElementById('langTo');
+  const translateBtn = document.getElementById('translateBtn');
+  const micBtn = document.getElementById('micBtn');
+  const bhashiniAsrBtn = document.getElementById('bhashiniAsrBtn');
+  const swapBtn = document.getElementById('swap');
+  const speakSrc = document.getElementById('speakSrc');
+  const speakTgt = document.getElementById('speakTgt');
+  const copySrc = document.getElementById('copySrc');
+  const copyTgt = document.getElementById('copyTgt');
+  const toast = document.getElementById('toast');
+
+  // === 22 Official Indian languages + useful entries ===
+  // Keys are short codes for local UI usage; for Bhashini calls we'll send the human-readable language name
+  const LANGS = {
+    "auto": "Auto-detect",
+    "en": "English",
+    "hi": "Hindi",
+    /* 22 scheduled languages: */
+    "as": "Assamese",
+    "bn": "Bengali",
+    "brx": "Bodo",
+    "doi": "Dogri",
+    "gu": "Gujarati",
+    "kn": "Kannada",
+    "ks": "Kashmiri",
+    "kok": "Konkani",
+    "mai": "Maithili",
+    "ml": "Malayalam",
+    "mni": "Manipuri",
+    "mr": "Marathi",
+    "ne": "Nepali",
+    "or": "Odia",
+    "pa": "Punjabi",
+    "sa": "Sanskrit",
+    "sat": "Santali",
+    "sd": "Sindhi",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "ur": "Urdu"
+  };
+
+  function fillLangs(){
+    langFrom.innerHTML = '';
+    langTo.innerHTML = '';
+    for(const [code,label] of Object.entries(LANGS)){
+      const o1 = document.createElement('option'); o1.value = code; o1.text = label;
+      const o2 = o1.cloneNode(true);
+      langFrom.appendChild(o1); langTo.appendChild(o2);
+    }
+    langFrom.value = 'auto';
+    langTo.value = 'hi';
+  }
+  fillLangs();
+
+  function showToast(msg, ms=1400){
+    toast.textContent = msg; toast.style.display='block';
+    setTimeout(()=>toast.style.display='none', ms);
+  }
+
+  function speak(text, langCode){
+    if(!text) return;
+    const u = new SpeechSynthesisUtterance(text);
+    if(langCode && langCode!=='auto') {
+      u.lang = (langCode.length>2 ? langCode.split('-')[0] : langCode);
+    }
+    try { speechSynthesis.cancel(); speechSynthesis.speak(u); } catch(e){ console.warn('TTS failed', e) }
+  }
+
+  speakSrc.addEventListener('click', ()=> speak(src.value, langFrom.value));
+  speakTgt.addEventListener('click', ()=> speak(tgt.value, langTo.value));
+  copySrc.addEventListener('click', ()=> navigator.clipboard.writeText(src.value).then(()=>showToast('Copied')));
+  copyTgt.addEventListener('click', ()=> navigator.clipboard.writeText(tgt.value).then(()=>showToast('Copied')));
+
+  swapBtn.addEventListener('click', ()=>{
+    const a = langFrom.value; langFrom.value = langTo.value; langTo.value = a;
+    const s = src.value; src.value = tgt.value; tgt.value = s;
+    showToast('Swapped');
+  });
+
+  // ---------- Bhashini client helpers (calls your server proxy) ----------
+  // NOTE: all calls go to your backend endpoints which hold the API key.
+  async function callBhashiniTranslate(text, fromCode, toCode){
+    // Convert UI code to human-readable name if needed for Bhashini — server can map.
+    return fetch('/api/bhashini/translate', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ q: text, from: fromCode, to: toCode })
+    }).then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(t)));
+  }
+
+  async function callBhashiniTTS(text, langCode, opts = {}){
+    // returns audio blob from server (server forwards Bhashini TTS)
+    const res = await fetch('/api/bhashini/tts', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ text, lang: langCode, options: opts })
+    });
+    if(!res.ok) throw new Error('TTS failed');
+    const blob = await res.blob();
+    return blob;
+  }
+
+  async function callBhashiniASR(audioBlob, langCode){
+    // Sends a user recorded blob to server which forwards to Bhashini ASR; server returns recognized text
+    const fd = new FormData();
+    fd.append('audio', audioBlob, 'speech.wav');
+    fd.append('lang', langCode || 'hi');
+    const res = await fetch('/api/bhashini/asr', { method:'POST', body:fd });
+    if(!res.ok) throw new Error('ASR failed');
+    return res.json();
+  }
+
+  // ---------- Main translation flow ----------
+  async function translateText(text, from, to){
+    if(!text) return '';
+    // prefer Bhashini if server is available, else fallback to your existing LibreTranslate + MyMemory logic.
+    try {
+      const j = await callBhashiniTranslate(text, from, to);
+      // server returns { translatedText: "...", transliteration: "...", detectedSource: "Hindi" }
+      if(j && j.translatedText) {
+        // Save last translation in localStorage for offline access
+        const entry = { src:text, translated:j.translatedText, from, to, at: Date.now() };
+        localStorage.setItem('last_translation', JSON.stringify(entry));
+        return j.translatedText;
+      }
+    } catch(err){
+      console.warn('Bhashini translate proxy failed, falling back:', err);
+    }
+
+    // fallback: your existing public providers (not shown here, keep your existing translateText implementation)
+    throw new Error('No translation provider available');
+  }
+
+  translateBtn.addEventListener('click', async ()=>{
+    const text = src.value.trim();
+    if(!text) { showToast('Enter text first'); return; }
+    translateBtn.disabled = true; translateBtn.textContent = 'Translating...';
+    try {
+      const out = await translateText(text, langFrom.value, langTo.value);
+      tgt.value = out;
+      showToast('Translated');
+    } catch(e){
+      console.error(e);
+      alert('Translation failed. See console for details.');
+    } finally {
+      translateBtn.disabled = false; translateBtn.textContent = 'Translate';
+    }
+  });
+
+  // ---------- Speech capture (client-side) ----------
+  const supportsSTT = ('SpeechRecognition' in window) || ('webkitSpeechRecognition' in window);
+  let recog = null;
+  if(supportsSTT){
+    const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recog = new Rec();
+    recog.interimResults = true;
+    recog.onstart = () => { micBtn.classList.add('listening'); micBtn.textContent = '🎤 Listening...'; };
+    recog.onend = () => { micBtn.classList.remove('listening'); micBtn.textContent = '🎤 Microphone'; };
+    recog.onerror = (e) => { console.warn('STT error', e); showToast('Mic error'); };
+    recog.onresult = (evt) => {
+      const text = Array.from(evt.results).map(r => r[0].transcript).join('');
+      src.value = text;
+    };
+  } else {
+    micBtn.style.display = 'none';
+  }
+
+  micBtn.addEventListener('click', ()=>{
+    if(!supportsSTT) { showToast('Speech recognition not supported'); return; }
+    try {
+      recog.lang = (langFrom.value === 'auto') ? 'en-US' : (langFrom.value.length>2 ? langFrom.value.split('-')[0] : langFrom.value);
+      src.value = ''; recog.start(); showToast('Listening');
+    } catch(err){
+      console.error('Mic start failed', err);
+      alert('Could not start microphone. Ensure page is served over HTTPS or localhost and mic permissions are allowed.');
+    }
+  });
+
+  // ---------- Bhashini ASR (server-side) ----------
+  // This will record a short snippet in the browser and POST to /api/bhashini/asr
+  bhashiniAsrBtn.addEventListener('click', async ()=>{
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { showToast('No microphone'); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const rec = new MediaRecorder(stream);
+      const chunks = [];
+      rec.ondataavailable = e => chunks.push(e.data);
+      rec.onstop = async () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' }); // server should accept or convert
+        try {
+          const json = await callBhashiniASR(blob, langFrom.value === 'auto' ? 'hi' : langFrom.value);
+          if(json && json.text) { src.value = json.text; showToast('Recognized'); }
+          else showToast('No text recognized');
+        } catch(err){
+          console.error(err); alert('Server ASR failed. See console.');
+        }
+      };
+      // record 4 seconds
+      rec.start();
+      showToast('Recording 4s...');
+      setTimeout(() => { rec.stop(); stream.getTracks().forEach(t=>t.stop()); }, 4000);
+    } catch(err){
+      console.error('ASR capture failed', err); alert('Could not record audio.');
+    }
+  });
+
+  // ---------- Bhashini TTS playback (via server proxy) ----------
+  // Example: click speakTgt to use Bhashini TTS if server is available
+  speakTgt.addEventListener('click', async ()=>{
+    const text = tgt.value || src.value;
+    if(!text) return;
+    try {
+      // try server TTS
+      const blob = await callBhashiniTTS(text, langTo.value);
+      const url = URL.createObjectURL(blob);
+      const a = new Audio(url);
+      a.play();
+    } catch(err){
+      // fallback to Web Speech TTS
+      speak(text, langTo.value);
+    }
+  });
+
+  // Keyboard: Ctrl/Cmd+Enter => translate
+  src.addEventListener('keydown', (e) => { if((e.ctrlKey||e.metaKey) && e.key === 'Enter') translateBtn.click(); });
+
+  // ------ PWA: register service worker ------
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('/service-worker.js').then(()=>console.log('SW registered')).catch(e=>console.warn('SW failed',e));
+  }
+
+  // Try to load last cached translation
+  try {
+    const last = JSON.parse(localStorage.getItem('last_translation') || 'null');
+    if(last && last.src && last.translated){
+      // populate fields if empty
+      if(!src.value) src.value = last.src;
+      if(!tgt.value) tgt.value = last.translated;
+    }
+  } catch(e){}
+
+  showToast('Ready');
+})();
+</script>
+</body>
+</html>
